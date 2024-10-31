@@ -35,8 +35,7 @@ class InferenceModel private constructor(
         if (!modelExists) {
             throw IllegalArgumentException("Model not found at path: $modelPath")
         }
-
-        val optionsBuilder = LlmInference.LlmInferenceOptions.builder()
+        al optionsBuilder = LlmInference.LlmInferenceOptions.builder()
             .setModelPath(modelPath)
             .setMaxTokens(maxTokens)
             .setTemperature(temperature)
