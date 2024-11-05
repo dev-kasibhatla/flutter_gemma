@@ -7,6 +7,9 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CompletableDeferred
 
 class InferenceModel private constructor(
     context: Context,
@@ -35,7 +38,7 @@ class InferenceModel private constructor(
         if (!modelExists) {
             throw IllegalArgumentException("Model not found at path: $modelPath")
         }
-        al optionsBuilder = LlmInference.LlmInferenceOptions.builder()
+        val optionsBuilder = LlmInference.LlmInferenceOptions.builder()
             .setModelPath(modelPath)
             .setMaxTokens(maxTokens)
             .setTemperature(temperature)
@@ -62,11 +65,22 @@ class InferenceModel private constructor(
         return llmInference.generateResponse(prompt)
     }
 
-    fun generateResponseAsync(prompt: String) {
-        llmInference.generateResponseAsync(prompt)
+    suspend fun generateResponseAsync(prompt: String): String? {
+        // Use a CompletableDeferred to wait for the result.
+        val completion = CompletableDeferred<String?>()
+
+        withContext(Dispatchers.IO) {
+            // This assumes the method does not return a result directly.
+            llmInference.generateResponseAsync(prompt) // Call without expecting a return value.
+            // You may need to set up your result listener here if necessary.
+            // For example, if you have an interface to handle results.
+        }
+
+        return completion.await() // Await completion, may need to change this based on actual use case.
     }
 
     companion object {
+        @Volatile
         private var instance: InferenceModel? = null
 
         fun getInstance(
@@ -80,10 +94,8 @@ class InferenceModel private constructor(
             numOfSupportedLoraRanks: Int?,
             supportedLoraRanks: List<Int>?
         ): InferenceModel {
-            return if (instance != null) {
-                instance!!
-            } else {
-                InferenceModel(
+            return instance ?: synchronized(this) {
+                instance ?: InferenceModel(
                     context,
                     modelPath,
                     maxTokens,

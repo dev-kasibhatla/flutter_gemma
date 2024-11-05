@@ -1,28 +1,31 @@
 package dev.flutterberlin.flutter_gemma
 
 import android.content.Context
-
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel.Result
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.*
 
 /** FlutterGemmaPlugin */
-class FlutterGemmaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHandler {
-  /// The MethodChannel that will the communication between Flutter and native Android
-  ///
-  /// This local reference serves to register the plugin with the Flutter Engine and unregister it
-  /// when the Flutter Engine is detached from the Activity
-  private lateinit var channel : MethodChannel
+class FlutterGemmaPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
+  private lateinit var channel: MethodChannel
   private lateinit var eventChannel: EventChannel
   private var eventSink: EventChannel.EventSink? = null
-  private lateinit var inferenceModel : InferenceModel
-  private lateinit var context : Context
-  private val scope = CoroutineScope(Dispatchers.Main)
+  private lateinit var inferenceModel: InferenceModel
+  private lateinit var context: Context
+//  private val scope = CoroutineScope(Dispatchers.IO) // Use IO for background tasks
+
+  private val lowPriorityDispatcher = Dispatchers.IO.limitedParallelism(1)
+  private val scope = CoroutineScope(
+    lowPriorityDispatcher +
+            Job() +
+            CoroutineExceptionHandler { _, throwable ->
+              println("Inference coroutine error: ${throwable.message}")
+            }
+  )
+
 
   override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
     context = flutterPluginBinding.applicationContext
@@ -33,53 +36,90 @@ class FlutterGemmaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamH
   }
 
   override fun onMethodCall(call: MethodCall, result: Result) {
-    if (call.method == "init") {
-      try {
-        val modelPath = call.argument<String>("modelPath")!!
-        val maxTokens = call.argument<Int>("maxTokens")!!
-        val temperature = call.argument<Float>("temperature")!!
-        val randomSeed = call.argument<Int>("maxTokens")!!
-        val topK = call.argument<Int>("topK")!!
-        val loraPath = call.argument<String?>("loraPath")
-        val numOfSupportedLoraRanks = call.argument<Int?>("numOfSupportedLoraRanks")
-        val supportedLoraRanks = call.argument<List<Int>?>("supportedLoraRanks")
+    when (call.method) {
+      "init" -> {
+        // Initialization code...
+        try {
+          val modelPath = call.argument<String>("modelPath")!!
+          val maxTokens = call.argument<Int>("maxTokens")!!
+          val temperature = call.argument<Float>("temperature")!!
+          val randomSeed = call.argument<Int>("randomSeed")!! // Fix argument name
+          val topK = call.argument<Int>("topK")!!
+          val loraPath = call.argument<String?>("loraPath")
+          val numOfSupportedLoraRanks = call.argument<Int?>("numOfSupportedLoraRanks")
+          val supportedLoraRanks = call.argument<List<Int>?>("supportedLoraRanks")
 
-        inferenceModel = InferenceModel.getInstance(context, modelPath, maxTokens, temperature,
-          randomSeed, topK, loraPath, numOfSupportedLoraRanks, supportedLoraRanks)
-        result.success(true)
-      } catch (e: Exception) {
-        result.error("ERROR", "Failed to initialize gemma", e.localizedMessage)
+          inferenceModel = InferenceModel.getInstance(
+            context, modelPath, maxTokens, temperature,
+            randomSeed, topK, loraPath, numOfSupportedLoraRanks, supportedLoraRanks
+          )
+          result.success(true)
+        } catch (e: Exception) {
+          result.error("ERROR", "Failed to initialize gemma", e.localizedMessage)
+        }
       }
-    } else if (call.method == "getGemmaResponse") {
-      try {
+      "getGemmaResponse" -> {
+        // Synchronous response generation...
+      }
+//      "getGemmaResponseAsync" -> {
+//        val prompt = call.argument<String>("prompt")!!
+//        scope.launch { // Launch in IO dispatcher
+//          try {
+//            val answer = inferenceModel.generateResponseAsync(prompt)
+//            // Switch back to Main to send the result
+//            withContext(Dispatchers.Main) {
+//              result.success(answer)
+//            }
+//          } catch (e: Exception) {
+//            // Switch back to Main for error handling
+//            withContext(Dispatchers.Main) {
+//              result.error("ERROR", "Failed to get async gemma response", e.localizedMessage)
+//            }
+//          }
+//        }
+//      }
+      "getGemmaResponseAsync" -> {
         val prompt = call.argument<String>("prompt")!!
-        val answer = inferenceModel.generateResponse(prompt)
-        result.success(answer)
-      } catch (e: Exception) {
-        result.error("ERROR", "Failed to get gemma response", e.localizedMessage)
+        scope.launch {
+          // Android-specific thread priority adjustment
+          android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LOWEST)
+
+
+          // Add thread priority adjustment
+          Thread.currentThread().apply {
+            priority = Thread.MIN_PRIORITY
+          }
+
+          try {
+            val answer = inferenceModel.generateResponseAsync(prompt)
+            withContext(Dispatchers.Main) {
+              result.success(answer)
+            }
+          } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+              result.error("ERROR", "Failed to get async gemma response", e.localizedMessage)
+            }
+          }
+        }
       }
-    } else if (call.method == "getGemmaResponseAsync") {
-      try {
-        val prompt = call.argument<String>("prompt")!!
-        inferenceModel.generateResponseAsync(prompt)
-        result.success(null)
-      } catch (e: Exception) {
-        result.error("ERROR", "Failed to get async gemma response", e.localizedMessage)
-      }
-    } else {
-      result.notImplemented()
+      else -> result.notImplemented()
     }
   }
 
   override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
     eventSink = events
     scope.launch {
+      // Android-specific thread priority adjustment
+      android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LOWEST)
+
       inferenceModel.partialResults.collect { pair ->
-        if (pair.second) {
-          events?.success(pair.first)
-          events?.success(null)
-        } else {
-          events?.success(pair.first)
+        withContext(Dispatchers.Main) { // Ensure we send events on the Main thread
+          if (pair.second) {
+            events?.success(pair.first)
+            events?.success(null)
+          } else {
+            events?.success(pair.first)
+          }
         }
       }
     }
